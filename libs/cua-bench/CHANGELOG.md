@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.2](https://github.com/trycua/cua/compare/bench-v0.3.1...bench-v0.3.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* **sandbox:** the [driver] extra installs the current cua-driver (0.37.0) (CUA-1902) ([#5533](https://github.com/trycua/cua/issues/5533)) ([34f3279](https://github.com/trycua/cua/commit/34f3279247e0e910e4896ee33c499beafdb7ab9a))
+* **sdk:** delete the Fleet SDK, pools and claims from the Rust SDK, cua-sandbox, Cua Bench and the apps (CUA-1836) ([#5488](https://github.com/trycua/cua/issues/5488)) ([348c47c](https://github.com/trycua/cua/commit/348c47cc30b1d222844480838ccc4acf53f7a511))
+* **security:** distrust the compromised eMudhra intermediates in every Cua client (CUA-1948) ([#5622](https://github.com/trycua/cua/issues/5622)) ([149ea51](https://github.com/trycua/cua/commit/149ea51c613cc840c3760dec822c57b7e65df05a))
+
 ## [0.3.1](https://github.com/trycua/cua/compare/bench-v0.3.0...bench-v0.3.1) (2026-10-19)
 
 
