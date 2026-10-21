@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-15-intel, windows-latest]
     env:
       CUA_TELEMETRY_ENABLED: "false"
       HF_DATASETS_OFFLINE: "1"
@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: 90ea8c35110199b19ffa3f0dbe40376339949cbd
+          ref: 6a875c92788f99909227cebb0201ac97303d78f8
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
