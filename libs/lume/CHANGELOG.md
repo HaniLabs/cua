@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/trycua/cua/compare/lume-v0.6.1...lume-v0.7.0) (2026-10-21)
+
+
+### Features
+
+* **lume:** add `lume cp` for host↔guest file transfer ([#4896](https://github.com/trycua/cua/issues/4896)) ([be898dc](https://github.com/trycua/cua/commit/be898dc7fc0034222aa7c75887dcd419e464befb))
+
+
+### Bug Fixes
+
+* **lume:** print VM details as labeled fields in terminals ([#5358](https://github.com/trycua/cua/issues/5358)) ([d9998fb](https://github.com/trycua/cua/commit/d9998fb4af5d94f784209b0129b9f98c80088d5d))
+* **lume:** pull parameterized OCI tar disk parts ([9c97c20](https://github.com/trycua/cua/commit/9c97c20ad8908bb9fbd26683f618253b7ca37c1c))
+* **lume:** verify VM owner before stopping ([524b7c4](https://github.com/trycua/cua/commit/524b7c43276fef51f9f01d9d74e6dfc2f6d9d519))
+
 ## [0.6.1](https://github.com/trycua/cua/compare/lume-v0.6.0...lume-v0.6.1) (2026-10-04)
 
 
