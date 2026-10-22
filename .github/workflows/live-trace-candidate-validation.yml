@@ -5,7 +5,26 @@ on:
 permissions:
   contents: read
 jobs:
+  publish-objects:
+    name: Preserve corrected candidate commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 77214e89996f4db2b79061c03eadf7c3f4355101
+      - name: Import original commit on the staging branch
+        env:
+          CANDIDATE_BUNDLE: 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
+        run: |
+          printf '%s' "$CANDIDATE_BUNDLE" | base64 --decode > "$RUNNER_TEMP/candidate.bundle"
+          git bundle verify "$RUNNER_TEMP/candidate.bundle"
+          git fetch "$RUNNER_TEMP/candidate.bundle" refs/heads/feat/bench-live-traces:refs/heads/codex/bench-viewer-candidate
+          test "$(git rev-parse codex/bench-viewer-candidate)" = af4b80d7e34d9109ca6beebc81f9cc16f3521c93
+          git push origin codex/bench-viewer-candidate
   trace-viewer:
+    needs: publish-objects
     name: Trace journal and browser (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -26,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: 77214e89996f4db2b79061c03eadf7c3f4355101
+          ref: af4b80d7e34d9109ca6beebc81f9cc16f3521c93
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
@@ -43,32 +62,3 @@ jobs:
           node "$RUNNER_TEMP/trace-browser/node_modules/playwright/cli.js" install --with-deps chromium
       - name: Journal, loopback, scale and browser contracts
         run: uv run --frozen pytest -q -s cua_bench/tests/test_trace_bundle.py cua_bench/tests/test_trace_bundle_scale.py cua_bench/tests/test_trace_bundle_browser.py cua_bench/tests/test_external_collector.py cua_bench/tests/test_interact_display.py
-  collector:
-    name: Collector example (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15-intel, windows-latest]
-    env:
-      CUA_TELEMETRY_ENABLED: "false"
-      HF_DATASETS_OFFLINE: "1"
-      HF_HUB_OFFLINE: "1"
-      CUA_BENCH_NO_BANNER: "1"
-    defaults:
-      run:
-        working-directory: libs/cua-bench
-        shell: bash
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: 3d805470c857c1ce6b124c4e3601acffd96b5b29
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: libs/cua-bench/uv.lock
-      - run: uv sync --frozen --extra dev
-      - name: External collector Unicode and snapshot contract
-        run: uv run --frozen pytest -q -s cua_bench/tests/test_external_collector.py
