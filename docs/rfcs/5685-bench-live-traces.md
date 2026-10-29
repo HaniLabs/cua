@@ -3,7 +3,7 @@ title: Ordered, attachment-aware live traces for Cua Bench
 authors:
   - HaniLabs
 created: 2026-10-21
-last_updated: 2026-10-21
+last_updated: 2026-10-29
 status: review
 discussion: https://github.com/trycua/cua/issues/5685
 rfc_pr:
@@ -76,16 +76,16 @@ five legacy columns: `event_name`, `data_json`, `data_images`, `trajectory_id`,
 existing functionality with a synthetic JSONL collector.
 
 The experimental [PR #5695](https://github.com/trycua/cua/pull/5695) includes that
-contribution and its original history. Its handoff candidate was
-`6a875c92788f99909227cebb0201ac97303d78f8`. Local follow-up work adds the three
-extensions below and the shared collector encoding correction. Earlier RFC
-comment text saying no implementation PR exists is stale; #5695 is open and draft.
+contribution and its original history. It includes the three extensions below
+and the shared collector encoding correction. Its current review head is
+`187a52da395df5caed31531cf10f6bbe3dd2e1d8`; #5695 is open and draft.
+Earlier candidate evidence is historical and does not certify this head.
 
 The implementation lives in
-[trace_bundle.py](../../libs/cua-bench/cua_bench/trace_bundle.py),
-[trace_live_viewer.py](../../libs/cua-bench/cua_bench/trace_live_viewer.py), the
-[viewer](../../libs/cua-bench/cua_bench/www/trace_live.js), and the existing
-[episode runner](../../libs/cua-bench/cua_bench/runner/episode.py).
+[trace_bundle.py](https://github.com/HaniLabs/cua/blob/187a52da395df5caed31531cf10f6bbe3dd2e1d8/libs/cua-bench/cua_bench/trace_bundle.py),
+[trace_live_viewer.py](https://github.com/HaniLabs/cua/blob/187a52da395df5caed31531cf10f6bbe3dd2e1d8/libs/cua-bench/cua_bench/trace_live_viewer.py), the
+[viewer](https://github.com/HaniLabs/cua/blob/187a52da395df5caed31531cf10f6bbe3dd2e1d8/libs/cua-bench/cua_bench/www/trace_live.js), and the existing
+[episode runner](https://github.com/HaniLabs/cua/blob/187a52da395df5caed31531cf10f6bbe3dd2e1d8/libs/cua-bench/cua_bench/runner/episode.py).
 
 ## Proposal
 
@@ -330,9 +330,9 @@ two-second local append-to-display target after indexing under the fixture load.
 Test all relevant host filesystems and loopback behavior on the final candidate.
 A configured CI lane or earlier passing SHA does not certify a later change.
 
-The handoff candidate's focused Linux, Windows and macOS Intel results are
-historical evidence only. New extension results belong in the current PR
-execution record with the exact tested SHA, commands and limitations. Hosted
+Earlier candidate results for Linux, Windows and macOS Intel are historical
+evidence only. Current-head results belong in the implementation PR execution
+record with the exact tested SHA, commands and limitations. Hosted
 macOS ARM64 is not covered by the Intel lane.
 
 ## Unresolved questions
@@ -346,8 +346,7 @@ macOS ARM64 is not covered by the Intel lane.
 
 ## Decision record
 
-As verified on October 21, 2026, #5685 is open with no recorded maintainer decision.
-PR #5695 exists and is draft; #5687 is the separate example contribution. This
-RFC is a review proposal. The user authorized continuing the local experiment
-while upstream acceptance remains gated. No accepted alternatives, waived risks,
-merge approval, released version or RFC completion is asserted here.
+As verified on October 29, 2026, #5685 is open with no recorded maintainer decision.
+PR #5695 remains draft; #5687 is the separate example contribution. This RFC is a
+review proposal. No accepted alternatives, waived risks, merge approval, released
+version or RFC completion is asserted here.
