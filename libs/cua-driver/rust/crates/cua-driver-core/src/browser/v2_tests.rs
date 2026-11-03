@@ -614,6 +614,7 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 "frameId": "F_MAIN",
                 "loaderId": "L_MAIN_NAVIGATED",
             })),
+            "Page.enable" | "Page.addScriptToEvaluateOnNewDocument" => MockReply::ok(json!({})),
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -1326,6 +1327,81 @@ async fn approved_existing_profile_attach_claims_then_binds_one_generation() {
 }
 
 #[tokio::test]
+async fn an_attached_tab_is_given_the_automation_hiding_script() {
+    const TRANSPORT: &str = "transport-v2-stealth";
+    let (f, _) = protected_existing_profile_fixture().await;
+    let prepare = BrowserPrepareTool::new(f.engine.clone())
+        .invoke(json!({
+            "pid": 1,
+            "window_id": 7,
+            "session": SESSION,
+            "_transport_session_id": TRANSPORT,
+            "strategy": { "kind": "existing_profile" }
+        }))
+        .await;
+    assert_eq!(
+        structured(&prepare)["status"],
+        "ok",
+        "{}",
+        structured(&prepare)
+    );
+
+    let state = GetBrowserStateTool::new(f.engine.clone())
+        .invoke(json!({
+            "pid": 1,
+            "window_id": 7,
+            "session": SESSION,
+            "_transport_session_id": TRANSPORT
+        }))
+        .await;
+    let bound = structured(&state);
+    let target = bound["target_id"].as_str().unwrap().to_owned();
+    let tab = bound["tabs"][0]["tab_id"].as_str().unwrap().to_owned();
+
+    let navigated = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/stealth",
+            "session": SESSION
+        }))
+        .await;
+    assert_eq!(
+        structured(&navigated)["status"],
+        "ok",
+        "{}",
+        structured(&navigated)
+    );
+
+    let calls = f.state.lock().unwrap().calls.clone();
+    let on_tab = |method: &str| {
+        calls
+            .iter()
+            .filter(|(session, observed, _)| {
+                method == observed
+                    && session
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("tab-sess-"))
+            })
+            .collect::<Vec<_>>()
+    };
+    // Without `Page.enable` the registration is acknowledged and never runs.
+    assert!(
+        !on_tab("Page.enable").is_empty(),
+        "Page.enable must reach the tab session first: {calls:?}"
+    );
+    let registered = on_tab("Page.addScriptToEvaluateOnNewDocument");
+    assert_eq!(registered.len(), 1, "{calls:?}");
+    let source = registered[0].2["source"].as_str().unwrap();
+    assert!(
+        source.contains("Navigator.prototype, 'webdriver'"),
+        "{source}"
+    );
+
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
 async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() {
     const TRANSPORT: &str = "transport-v2-method-policy";
     let (f, _) = protected_existing_profile_fixture().await;
@@ -1403,10 +1479,13 @@ async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() 
         structured(&navigated)
     );
 
+    // `Page.enable` and `Page.addScriptToEvaluateOnNewDocument` were forbidden while nothing in
+    // the attach path used them. The attach path now registers the automation-hiding script on
+    // the tab's own session, and both are read-shaped: they change no state a later command
+    // depends on. `an_attached_tab_is_given_the_automation_hiding_script` pins that pairing.
     let forbidden = [
         "Runtime.enable",
         "Target.setDiscoverTargets",
-        "Page.addScriptToEvaluateOnNewDocument",
         "Network.enable",
         "Fetch.enable",
         "Emulation.setUserAgentOverride",

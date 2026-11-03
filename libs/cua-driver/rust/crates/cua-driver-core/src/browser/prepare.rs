@@ -490,7 +490,16 @@ fn isolated_browser_command(executable: &str, profile: &Path) -> Command {
         .arg("--disable-background-networking")
         .arg("--disable-component-update")
         .arg("--disable-default-apps")
-        .arg("--disable-extensions");
+        .arg("--disable-extensions")
+        // Keeps Chromium from setting `navigator.webdriver` and from showing the "controlled by
+        // automated software" infobar, for every document and every tab the page opens. The
+        // attach-time half of the same job lives in `browser::stealth`.
+        .arg("--disable-blink-features=AutomationControlled")
+        // A person's Chrome is not freshly provisioned on every start.
+        .arg("--no-service-autorun")
+        .arg("--hide-crash-restore-bubble")
+        .arg("--disable-search-engine-choice-screen")
+        .arg("--disable-features=Translate,MediaRouter,OptimizationHints");
     #[cfg(target_os = "windows")]
     command
         .arg("--window-position=40,40")
@@ -1485,6 +1494,23 @@ impl BrowserEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launched_browser_does_not_announce_the_automation() {
+        let command = isolated_browser_command("/Applications/Chrome", Path::new("/tmp/profile"));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--disable-blink-features=AutomationControlled"),
+            "the page would report navigator.webdriver: {args:?}"
+        );
+        // The flag only helps a browser this process launches, not one it attaches to.
+        assert!(args.iter().any(|arg| arg == "--remote-debugging-port=0"));
+        assert!(args.iter().any(|arg| arg.starts_with("--user-data-dir=")));
+    }
 
     #[tokio::test]
     async fn spawned_attestation_retries_absence_but_propagates_profile_errors() {

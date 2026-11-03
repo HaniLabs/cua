@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **cua-driver:** stop announcing the automation. A launch now passes
+  `--disable-blink-features=AutomationControlled`, so Chromium never sets `navigator.webdriver` and
+  never shows the "controlled by automated software" infobar; a browser that was already running
+  cannot be relaunched with a flag, so attaching a tab installs a document-start script that keeps
+  the flag false and repairs the corroborating tells (`window.chrome.runtime`, the PDF-viewer
+  plugins, the notifications permission answer, a software GPU's name). Sign-in walls that refuse an
+  automated browser — X: "This browser or app may not be secure" — let the credentials through.
+  `Page.addScriptToEvaluateOnNewDocument` joins the reviewed existing-profile CDP surface, and
+  `CUA_DRIVER_NO_STEALTH=1` opts out. See `docs/browser-automation-hiding.md`.
+
 ## [0.38.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.37.0...cua-driver-rs-v0.38.0) (2026-10-20)
 
 

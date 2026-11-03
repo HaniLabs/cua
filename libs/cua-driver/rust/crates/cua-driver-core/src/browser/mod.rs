@@ -52,6 +52,7 @@ mod reconnect;
 pub mod refusal;
 mod semantic;
 mod setup_descriptor;
+mod stealth;
 pub mod store;
 pub mod tools;
 pub mod types;

@@ -56,6 +56,8 @@ const EXISTING_PROFILE_METHODS: &[&str] = &[
     "Input.dispatchMouseEvent",
     "Input.insertText",
     "Page.bringToFront",
+    // Registers the automation-hiding script; read-shaped, it changes no page state.
+    "Page.addScriptToEvaluateOnNewDocument",
     "Page.captureScreenshot",
     "Page.enable",
     "Page.getFrameTree",
@@ -1175,10 +1177,11 @@ mod tests {
         let conn = CdpConnection::connect(&server.ws_url()).await.unwrap();
         conn.restrict_to_existing_profile();
 
+        // `Page.enable` and the script registration are in the attach path now; see
+        // `approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface`.
         for method in [
             "Runtime.enable",
             "Target.setDiscoverTargets",
-            "Page.addScriptToEvaluateOnNewDocument",
             "Network.enable",
             "Fetch.enable",
             "Emulation.setUserAgentOverride",
