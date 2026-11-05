@@ -112,6 +112,42 @@ describe("screen 2, an offline computer", () => {
   });
 });
 
+describe("screen 2, a long list", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `off-${i}`, name: `Old box ${i + 1}`, os: "linux", online: false, lastSeen: NOW / 1000 - 86400, current: false }));
+  const long = { ...base, machines: [...base.machines!, ...many(13)] };
+
+  it("folds offline computers into one row with their count, so the online ones and Continue stay in view", () => {
+    drawWhere(long);
+    const fold = document.querySelector<HTMLElement>("[data-new-run-offline-fold]")!;
+    // Gaming PC and the 13 old boxes.
+    expect(fold.textContent).toContain("14 offline");
+    expect(fold.getAttribute("aria-expanded")).toBe("false");
+    const ids = () => [...document.querySelectorAll<HTMLElement>("[data-new-run-computer]")].map((e) => e.dataset.newRunComputer);
+    expect(ids()).toEqual(["this", "mini", "build"]);
+    fireEvent.click(fold);
+    expect(fold.getAttribute("aria-expanded")).toBe("true");
+    expect(ids()).toHaveLength(3 + 14);
+    expect(document.querySelector("[data-new-run-computer=pc]")!.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(fold);
+    expect(ids()).toEqual(["this", "mini", "build"]);
+  });
+
+  it("counts whatever is offline", () => {
+    expect(whereView({ ...base, machines: [...base.machines!, ...many(2)] }).offlineFold?.label).toBe("3 offline");
+    // One offline computer shows as itself.
+    expect(whereView(base).offlineFold).toBeNull();
+    expect(whereView({ ...base, machines: base.machines!.map((m) => ({ ...m, online: true })) }).offlineFold).toBeNull();
+  });
+
+  it("keeps Continue in a footer that sticks to the bottom of the window", () => {
+    drawWhere(long);
+    const footer = document.querySelector<HTMLElement>("[data-new-run-footer]")!;
+    expect(footer.className).toContain("sticky");
+    expect(footer.className).toContain("bottom-0");
+    expect(footer.contains(screen.getByRole("button", { name: "Continue" }))).toBe(true);
+  });
+});
+
 describe("screen 2, signed out (after Skip for now)", () => {
   it("shows this Mac not added yet with Add, 'Sign in to see your other computers', and no Add another computer", () => {
     const onAddThis = vi.fn();
@@ -175,6 +211,16 @@ describe("1b, sign-in", () => {
     expect(v).toMatchObject({ title: "Sign-in didn't finish", line: "The browser didn't confirm in time. Try again, or use a code if your browser is on another device.", tryAgainPrimary: true, waiting: null });
     // Other reasons keep the core's own line.
     expect(signInView({ kind: "failed", reason: "offline", message: "You're offline." }, null).line).toBe("You're offline.");
+  });
+
+  it("a session that could not be saved says so on 1b, with Try again and Use a code instead", () => {
+    const msg = "Sign-in didn't finish. Cua couldn't save your session on this computer.";
+    const v = signInView({ kind: "failed", reason: "couldNotSave", message: msg }, null);
+    render(<SignInScreen view={v} onTryAgain={noop} onUseCode={noop} onOpen={noop} />);
+    expect(screen.getByRole("heading").textContent).toBe("Sign-in didn't finish");
+    expect(text()).toContain(msg);
+    expect(screen.getByRole("button", { name: "Try again" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Use a code instead" })).not.toBeNull();
   });
 
   it("with a code shows the code and the page to enter it on", () => {

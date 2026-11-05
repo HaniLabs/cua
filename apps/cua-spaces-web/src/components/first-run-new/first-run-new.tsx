@@ -13,7 +13,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon, ChevronRightIcon, CopyIcon, LoaderCircleIcon, MonitorIcon, PlusIcon, ShieldIcon, UserPlusIcon } from "lucide-react";
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { newPendingId, useMachines, useSession, useSettings, useSpaces, type SignInPhase } from "@/bridge";
+import { folderLabel, newPendingId, useMachines, useSession, useSettings, useSpaces, type SignInPhase } from "@/bridge";
 import { BridgeContext } from "@/bridge/BridgeProvider";
 import type { HostStatus } from "@/bridge/contracts/host";
 import { readFirstRun, useFirstRunSaved, writeFirstRun } from "@/bridge/first-run";
@@ -23,7 +23,9 @@ import { readSavedOnboarding, writeSavedOnboarding } from "@/bridge/onboarding";
 import { extraName, spokenName } from "@/bridge/space-names";
 import { AddComputerSheet } from "@/components/add-computer-sheet";
 import { AppMarkImage } from "@/components/agents/harness-mark";
+import { agoLabel, useRecentThreads } from "@/components/ask-first/pick-up";
 import { CuaLogo } from "@/components/cua-logo";
+import { addImportedTask, type AskTask } from "@/lib/ask-first";
 import {
   agentView,
   chosenAgent,
@@ -31,6 +33,7 @@ import {
   INSTALL_PAGES,
   NEW_RUN_EMPTY,
   nextView,
+  placeName,
   readyView,
   signInView,
   togglePick,
@@ -199,6 +202,9 @@ export function WhereScreen({
 }) {
   const t = view.thisRow;
   const sep = view.separate;
+  const fold = view.offlineFold;
+  const [showOffline, setShowOffline] = useState(false);
+  const other = (o: ComputerRow) => <Row key={o.id} icon={<Mark os={o.os} />} name={o.name} sub={o.sub} picked={o.picked} disabled={o.disabled} onClick={() => onToggle(o.id)} data-new-run-computer={o.id} data-offline={o.disabled ? "" : undefined} />;
   return (
     <div data-new-run="where">
       <Title>{view.title}</Title>
@@ -240,7 +246,30 @@ export function WhereScreen({
           <>
             <Label>{view.othersLabel}</Label>
             {view.others.length ? (
-              view.others.map((o) => <Row key={o.id} icon={<Mark os={o.os} />} name={o.name} sub={o.sub} picked={o.picked} disabled={o.disabled} onClick={() => onToggle(o.id)} data-new-run-computer={o.id} data-offline={o.disabled ? "" : undefined} />)
+              <>
+                {(fold ? view.others.filter((o) => !o.offline) : view.others).map(other)}
+                {fold ? (
+                  <>
+                    <button
+                      type="button"
+                      aria-expanded={showOffline}
+                      // design-ok: the first run is drawn from the spaces.cua.ai hero (storyboard CUA-3193), not the app's pages
+                      className="flex w-full items-center gap-3 rounded-[14px] px-3 py-[7px] text-left outline-none hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-[#5ec0e8]"
+                      onClick={() => setShowOffline((v) => !v)}
+                      data-new-run-offline-fold={fold.rows.length}
+                    >
+                      <span className="flex size-7 shrink-0 items-center justify-center text-white">
+                        <ChevronRightIcon className={cn("size-4 transition-transform motion-reduce:transition-none", showOffline && "rotate-90")} strokeWidth={2.2} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[15px] leading-5 font-medium text-white">{fold.label}</span>
+                        <span className={cn("block text-[13.5px] leading-[19px] font-medium", GREY)}>{fold.sub}</span>
+                      </span>
+                    </button>
+                    {showOffline ? fold.rows.map(other) : null}
+                  </>
+                ) : null}
+              </>
             ) : (
               <p className={cn("px-3 pt-1 pb-2 text-[13.5px] leading-[19px] font-medium", GREY)} data-new-run-none="">
                 {view.emptyLine}
@@ -295,7 +324,8 @@ export function WhereScreen({
           </div>
         ) : null}
       </div>
-      <div className="mt-[min(28px,3vh)]">
+      {/* Stays in view at the bottom of the window however long the list is; the fade keeps the list readable under it. */}
+      <div className="sticky bottom-0 z-10 -mx-4 mt-2 bg-linear-to-t from-[#050607] from-60% to-transparent px-4 pt-[min(20px,2.2vh)] pb-3" data-new-run-footer="">
         <button type="button" className={WHITE_BUTTON} disabled={!view.continueEnabled} onClick={onContinue} data-onboarding-primary="">
           Continue
         </button>
@@ -356,7 +386,46 @@ export function AgentScreen({ view, onPick, onContinue, onInstall, busy }: { vie
   );
 }
 
-export function ReadyScreen({ view, agent, onDone }: { view: ReadyView; agent: string; onDone: () => void }) {
+/**
+ * "Pick up where you left off" (CUA-3319): 2 to 4 of the person's recent chats with their agents on
+ * this computer, each with **Continue in Cua**, which opens it in a new Home task with what was said
+ * so far. Nothing runs until they send. Hidden when there are none. Only each chat's title, folder
+ * and time are read here; its messages are read when it is picked.
+ */
+export function PickUpWhereYouLeftOff({ onContinue, place = "this Mac", className }: { onContinue: (task: AskTask) => void; place?: string; className?: string }) {
+  const threads = useRecentThreads();
+  if (!threads?.length) return null;
+  return (
+    <section aria-labelledby="pick-up-heading" className={cn("w-full", className)} data-pick-up="">
+      <h2 id="pick-up-heading" className="text-[15px] font-semibold text-white">
+        Pick up where you left off
+      </h2>
+      <ul className={cn(CARD, "mt-2.5 max-w-[600px]")}>
+        {threads.map((t) => {
+          const folder = folderLabel(t.cwd);
+          const when = agoLabel(t.lastActiveMs);
+          return (
+            <li key={`${t.agent}:${t.id}`} className="flex items-center gap-3 px-3 py-2.5" data-pick-up-row={t.agent}>
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-full shadow-[inset_0_0_0_1px_rgb(255_255_255/0.28)]">
+                <AppMarkImage agent={t.agent} className="size-3.5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[15px] leading-5 font-medium text-white">{t.title}</span>
+                <span className={cn("block truncate text-[13.5px] leading-[19px] font-medium", GREY)}>{folder ? `${folder}, ${when}` : when}</span>
+              </span>
+              <button type="button" className={cn(GLASS_CHIP, "h-[30px] shrink-0 px-3 text-[13.5px]")} onClick={() => onContinue(addImportedTask(t))} data-pick-up-continue="">
+                Continue in Cua
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className={cn("mt-2 text-[13.5px] font-medium", GREY)}>Your chats stay on {place} until you pick one.</p>
+    </section>
+  );
+}
+
+export function ReadyScreen({ view, agent, onDone, onContinueChat, place }: { view: ReadyView; agent: string; onDone: () => void; onContinueChat?: (task: AskTask) => void; place?: string }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     void navigator.clipboard?.writeText(view.command).catch(() => {});
@@ -379,6 +448,8 @@ export function ReadyScreen({ view, agent, onDone }: { view: ReadyView; agent: s
           {copied ? "Copied" : view.copy}
         </button>
       </div>
+      {/* The person's own recent chats on this computer (CUA-3319), hidden when there are none. */}
+      {onContinueChat ? <PickUpWhereYouLeftOff className="mt-[min(28px,3vh)]" place={place} onContinue={onContinueChat} /> : null}
       <div className="mt-6">
         <button type="button" className={WHITE_BUTTON} onClick={onDone} data-onboarding-primary="">
           {view.done}
@@ -512,6 +583,24 @@ export function NewFirstRun() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.screen, signedIn, phase.kind]);
+
+  // Back from the browser: read the sign-in again at once, so one that finished
+  // (or failed) there shows now, not on the next host push.
+  const waitingOnSignIn = s.screen === "signin" && (phase.kind === "starting" || phase.kind === "waiting");
+  const refreshSession = useRef(session.refresh);
+  refreshSession.current = session.refresh;
+  useEffect(() => {
+    if (!waitingOnSignIn) return;
+    const again = () => {
+      if (document.visibilityState !== "hidden") void refreshSession.current().catch(() => {});
+    };
+    window.addEventListener("focus", again);
+    document.addEventListener("visibilitychange", again);
+    return () => {
+      window.removeEventListener("focus", again);
+      document.removeEventListener("visibilitychange", again);
+    };
+  }, [waitingOnSignIn]);
 
   // Screen 2, signed in: this computer joins the account (once; the store also does it on sign-in).
   const addRun = useRef(0);
@@ -687,6 +776,12 @@ export function NewFirstRun() {
     writeFirstRun({ finishedLater: false, todosClosed: false });
     await navigate({ to: "/home" });
   };
+  // Continue in Cua (CUA-3319): setup is done and the picked chat opens as a Home task. Nothing runs until the person sends.
+  const continueChat = async (task: AskTask) => {
+    await session.completeOnboarding(thisState === "added" && signedIn ? "host" : "client").catch(() => {});
+    writeFirstRun({ finishedLater: false, todosClosed: false });
+    await navigate({ to: "/home/$taskId", params: { taskId: task.id } });
+  };
 
   const startSignIn = () => {
     started.current = true;
@@ -747,7 +842,9 @@ export function NewFirstRun() {
       );
       break;
     case "ready":
-      body = s.agent ? <ReadyScreen view={readyView({ os, agent: s.agent, computers: pickedNames() })} agent={s.agent} onDone={() => go("next")} /> : null;
+      body = s.agent ? (
+        <ReadyScreen view={readyView({ os, agent: s.agent, computers: pickedNames() })} agent={s.agent} place={placeName(os)} onDone={() => go("next")} onContinueChat={(task) => void continueChat(task)} />
+      ) : null;
       break;
     case "next": {
       const granted = (id: string) => Boolean(host?.permissions.find((p) => p.id === id)?.granted);
