@@ -1,18 +1,14 @@
-//! Making a driven Chrome look like somebody's Chrome.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
+//! Experimental browser automation-hiding script for an explicitly approved navigation.
 //!
-//! A page gets two questions answered by the browser itself before it decides whether to serve a
-//! person or a robot: *is this under automation* (`navigator.webdriver`, the infobar) and *what
-//! kind of browser is this* (plugins, `window.chrome`, WebGL, permissions). Sign-in walls act on
-//! the answer — X says "This browser or app may not be secure" and never looks at the password.
 //!
-//! Half of the answer is fixed at launch and cannot be fixed afterwards, so
-//! [`super::prepare`] passes `--disable-blink-features=AutomationControlled`: Chromium then never
-//! sets `navigator.webdriver` nor shows the "controlled by automated software" infobar, for every
-//! document and every tab the page opens.
-//!
-//! The other half is repaired here, at attach time, for browsers that were already running and
-//! cannot be relaunched with a flag. Every patch is narrow and only fires when the automation tell
-//! is actually present, so a genuine headful Chrome keeps its own values.
+//! This script changes page-visible browser properties. It is registered only
+//! for one explicitly approved navigation attempt, an exact HTTPS origin and
+//! top-level frame. Registration is temporary; applied properties remain in a
+//! loaded document until it is replaced. A dedicated trusted host must approve
+//! the additional effect separately from ordinary profile attachment.
 
 /// What a Chromium-derived automation stack gets wrong, and what a person's Chrome reports.
 ///
@@ -42,7 +38,8 @@ const HIDE_AUTOMATION_SCRIPT: &str = r#"
     } catch (_) {}
   };
   hideWebdriver();
-  setInterval(hideWebdriver, 30);
+  const interval = setInterval(hideWebdriver, 30);
+  setTimeout(() => clearInterval(interval), 15000);
 
   // 2. `window.chrome` is how a page checks for a Chromium build that is not a bare automation
   //    shell. Real Chrome is missing pieces of it with extensions disabled.
@@ -124,83 +121,80 @@ const HIDE_AUTOMATION_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Whether the attach-time half is wanted. Callers that want to observe the tell itself set
-/// `CUA_DRIVER_NO_STEALTH`.
-pub fn script_enabled() -> bool {
-    enabled_for(std::env::var("CUA_DRIVER_NO_STEALTH").ok().as_deref())
+/// Approval for one exact origin. The fields are private so only a successful
+/// request-bound trusted provider can construct this capability.
+pub(super) struct ApprovedHiding {
+    origin: String,
+    grant: crate::consent::ProtectedGrant,
 }
 
-/// The switch, split out so it can be tested without touching the process environment.
-fn enabled_for(value: Option<&str>) -> bool {
-    !matches!(
-        value
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
-/// Collapse a CDP error into one log line.
-fn failure_detail(detail: &str) -> String {
-    detail
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(240)
-        .collect()
-}
-
-/// Install the document-start script on one tab session.
-///
-/// `Page.enable` goes first: without it the registration is acknowledged and never runs.
-pub async fn install(
-    connection: &super::cdp_ws::CdpConnection,
-    session: &str,
-) -> Result<(), String> {
-    if !script_enabled() {
-        return Ok(());
-    }
-    connection
-        .call(Some(session), "Page.enable", serde_json::json!({}))
-        .await
-        .map_err(|error| failure_detail(&format!("Page.enable: {error}")))?;
-    let params = serde_json::json!({ "source": HIDE_AUTOMATION_SCRIPT });
-    connection
-        .call(
-            Some(session),
-            "Page.addScriptToEvaluateOnNewDocument",
-            params,
-        )
-        .await
-        .map_err(|error| {
-            failure_detail(&format!("Page.addScriptToEvaluateOnNewDocument: {error}"))
-        })?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_switch_is_opt_out() {
-        assert!(enabled_for(None));
-        assert!(enabled_for(Some("")));
-        assert!(enabled_for(Some("0")));
-        for off in ["1", "true", "TRUE", " yes ", "on", "On"] {
-            assert!(!enabled_for(Some(off)), "{off}");
-        }
+impl ApprovedHiding {
+    pub(super) fn origin(&self) -> &str {
+        &self.origin
     }
 
-    #[test]
-    fn the_script_hides_the_tell_the_wall_reads() {
-        assert!(HIDE_AUTOMATION_SCRIPT.contains("Navigator.prototype, 'webdriver'"));
-        // Chromium re-defines the property when a document commits its automation state, so a
-        // one-shot delete is not enough.
-        assert!(HIDE_AUTOMATION_SCRIPT.contains("setInterval(hideWebdriver"));
-        assert!(HIDE_AUTOMATION_SCRIPT.contains("window.chrome"));
+    pub(super) fn is_live(&self) -> bool {
+        self.grant.is_live()
     }
+}
+
+impl Drop for ApprovedHiding {
+    fn drop(&mut self) {
+        self.grant.revoke();
+    }
+}
+
+pub(super) async fn approve(
+    engine: &super::engine::BrowserEngine,
+    tab: &super::engine::ValidatedTab,
+    public_session: &str,
+    origin: String,
+) -> Result<ApprovedHiding, String> {
+    use super::types::EndpointAccessClass;
+    use crate::authorization::{PermissionMode, RiskClass};
+
+    if tab.record.endpoint_access_class != EndpointAccessClass::ExistingProfileApproved {
+        return Err("automation hiding is supported only for an approved existing-profile tab".into());
+    }
+    let context = crate::tool::current_dispatch_authorization_context();
+    if context.as_deref().is_some_and(|ctx| ctx.capability_manifest().is_some()) {
+        return Err("automation hiding is unavailable for manifest-scoped sessions".into());
+    }
+    let mode = context.as_deref().map(|ctx| ctx.mode()).map(Ok)
+        .unwrap_or_else(crate::authorization::configured_permission_mode)
+        .map_err(|error| format!("permission mode is unavailable: {error}"))?;
+    if mode == PermissionMode::Bounded {
+        return Err("automation hiding is unavailable for bounded sessions".into());
+    }
+    let transport = tab.record.transport_session.as_deref().unwrap_or(public_session);
+    let request = engine.approval_broker.request(
+        mode,
+        "browser_navigate.existing_profile_automation_hiding",
+        RiskClass::R2,
+        public_session.to_owned(),
+        transport.to_owned(),
+        serde_json::json!({
+            "pid": tab.record.pid,
+            "window_id": tab.record.window_id,
+            "target": tab.tab.cdp_target_id,
+            "origin": origin,
+            "generation": tab.record.generation,
+            "tab_generation": tab.tab.generation,
+            "process_fingerprint": tab.record.fingerprint,
+        }),
+        format!(
+            "Allow Cua to change page-visible browser properties on the top-level {origin} page in browser window {} for this navigation attempt? Changes already made remain until the page is replaced.",
+            tab.record.window_id
+        ),
+    );
+    let grant = engine.approval_broker.approve(&request).await
+        .map_err(|error| format!("separate trusted approval was not granted: {error}"))?;
+    Ok(ApprovedHiding { origin, grant })
+}
+
+/// Only the exact top-level HTTPS origin may execute the fixed script. JSON
+/// encoding prevents the approved origin from becoming JavaScript source.
+pub(super) fn script_for_origin(origin: &str) -> String {
+    let scope = serde_json::to_string(origin).expect("serializing a string cannot fail");
+    format!("if (self === self.top && location.origin === {scope}) {{\n{HIDE_AUTOMATION_SCRIPT}\n}}")
 }

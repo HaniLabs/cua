@@ -59,8 +59,6 @@ const EXISTING_PROFILE_METHODS: &[&str] = &[
     "Input.dispatchMouseEvent",
     "Input.insertText",
     "Page.bringToFront",
-    // Registers the automation-hiding script; read-shaped, it changes no page state.
-    "Page.addScriptToEvaluateOnNewDocument",
     "Page.captureScreenshot",
     "Page.enable",
     "Page.getFrameTree",
@@ -381,6 +379,57 @@ impl CdpConnection {
                 "existing-profile CDP policy refused method {method}; the reviewed personal-profile command set cannot be bypassed"
             );
         }
+        self.call_reviewed(session_id, method, params, timeout).await
+    }
+
+    // Only the fixed internal document script is available through this path;
+    // ordinary callers and the shared existing-profile policy cannot supply a
+    // CDP method or arbitrary JavaScript. The caller must have obtained the
+    // separate request-bound opt-in before using this method.
+    pub(super) async fn register_approved_hiding_script(
+        &self,
+        session_id: &str,
+        approval: &super::stealth::ApprovedHiding,
+    ) -> anyhow::Result<Value> {
+        anyhow::ensure!(approval.is_live(), "automation-hiding approval has ended");
+        let source = super::stealth::script_for_origin(approval.origin());
+        self.call_reviewed(
+            Some(session_id),
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({"source": source}),
+            Duration::from_secs(2),
+        )
+        .await
+    }
+
+    /// Fail closed when a dedicated opt-in session cannot be detached.
+    pub(super) async fn close_after_cleanup_failure(&self) {
+        self.demux.close();
+        self.reader.abort();
+        let _ = self.writer.lock().await.close().await;
+    }
+
+    pub(super) async fn remove_approved_hiding_script(
+        &self,
+        session_id: &str,
+        identifier: &str,
+    ) -> anyhow::Result<Value> {
+        self.call_reviewed(
+            Some(session_id),
+            "Page.removeScriptToEvaluateOnNewDocument",
+            serde_json::json!({"identifier": identifier}),
+            Duration::from_secs(2),
+        )
+        .await
+    }
+
+    async fn call_reviewed(
+        &self,
+        session_id: Option<&str>,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
         if self.is_closed() {
             anyhow::bail!("CDP socket closed before {method}");
         }
@@ -1194,9 +1243,9 @@ mod tests {
         let conn = CdpConnection::connect(&server.ws_url()).await.unwrap();
         conn.restrict_to_existing_profile();
 
-        // `Page.enable` and the script registration are in the attach path now; see
-        // `approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface`.
+        // The generic shared connection never authorizes document-start injection.
         for method in [
+            "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.enable",
             "Target.setDiscoverTargets",
             "Network.enable",

@@ -99,6 +99,7 @@ pub(super) struct FixtureState {
     dom_click_reads_before_failure: Option<usize>,
     /// Answer every post-snapshot semantic readback after this delay.
     dom_click_readback_delay: Option<std::time::Duration>,
+    hiding_navigation_events: bool,
     /// Every incoming CDP call: (sessionId, method, params).
     calls: Vec<(Option<String>, String, Value)>,
 }
@@ -143,6 +144,7 @@ impl Default for FixtureState {
             dom_click_focused: false,
             dom_click_reads_before_failure: None,
             dom_click_readback_delay: None,
+            hiding_navigation_events: false,
             calls: Vec::new(),
         }
     }
@@ -649,11 +651,20 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             "Page.captureScreenshot" if is_tab => {
                 MockReply::ok(json!({"data": st.screenshot_data.clone()}))
             }
-            "Page.navigate" if is_tab => MockReply::ok(json!({
-                "frameId": "F_MAIN",
-                "loaderId": "L_MAIN_NAVIGATED",
-            })),
-            "Page.enable" | "Page.addScriptToEvaluateOnNewDocument" => MockReply::ok(json!({})),
+            "Page.navigate" if is_tab => {
+                let reply = MockReply::ok(json!({"frameId": "F_MAIN", "loaderId": "L_MAIN_NAVIGATED"}));
+                if st.hiding_navigation_events {
+                    reply.with_events(vec![
+                        MockEvent { method: "Page.loadEventFired".into(), params: json!({}), session_id: Some(sess.clone()) },
+                        MockEvent { method: "Page.frameNavigated".into(), params: json!({"frame":{"id":"F_MAIN", "loaderId":"OLD"}}), session_id: Some(sess.clone()) },
+                        MockEvent { method: "Page.frameNavigated".into(), params: json!({"frame":{"id":"F_MAIN", "loaderId":"L_MAIN_NAVIGATED"}}), session_id: Some(sess.clone()) },
+                        MockEvent { method: "Page.loadEventFired".into(), params: json!({}), session_id: Some(sess.clone()) },
+                    ])
+                } else { reply }
+            },
+            "Page.addScriptToEvaluateOnNewDocument" => MockReply::ok(json!({"identifier":"approved-script"})),
+            "Page.removeScriptToEvaluateOnNewDocument" | "Target.detachFromTarget" => MockReply::ok(json!({})),
+            "Page.enable" => MockReply::ok(json!({})),
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -1135,6 +1146,7 @@ pub(super) async fn fixture() -> Fixture {
 
 struct FixtureProtectedProvider {
     consent_seen: AtomicBool,
+    decline_hiding: AtomicBool,
 }
 
 #[async_trait]
@@ -1149,7 +1161,13 @@ impl crate::consent::ProtectedConsentProvider for FixtureProtectedProvider {
     ) -> Result<crate::consent::ProviderDecision, String> {
         self.consent_seen.store(true, Ordering::SeqCst);
         Ok(crate::consent::ProviderDecision {
-            action: crate::consent::ConsentAction::Accept,
+            action: if request.operation == "browser_navigate.existing_profile_automation_hiding"
+                && self.decline_hiding.load(Ordering::SeqCst)
+            {
+                crate::consent::ConsentAction::Decline
+            } else {
+                crate::consent::ConsentAction::Accept
+            },
             request_digest: request.request_digest.clone(),
         })
     }
@@ -1161,6 +1179,7 @@ async fn protected_existing_profile_fixture() -> (Fixture, Arc<FixtureProtectedP
     let setup_invoked = Arc::new(AtomicBool::new(false));
     let provider = Arc::new(FixtureProtectedProvider {
         consent_seen: AtomicBool::new(false),
+            decline_hiding: AtomicBool::new(false),
     });
     let engine = BrowserEngine::new_with_protected_consent_provider(
         Arc::new(FixturePlatform {
@@ -1209,6 +1228,7 @@ async fn existing_profile_setup_fixture() -> (Fixture, Arc<AtomicBool>) {
         }),
         Some(Arc::new(FixtureProtectedProvider {
             consent_seen: AtomicBool::new(false),
+            decline_hiding: AtomicBool::new(false),
         })),
     );
     (
@@ -1246,6 +1266,7 @@ async fn attach_fixture_with_space(
     });
     let provider = Arc::new(FixtureProtectedProvider {
         consent_seen: AtomicBool::new(false),
+            decline_hiding: AtomicBool::new(false),
     });
     let engine = BrowserEngine::new_with_protected_consent_provider(
         Arc::new(FixturePlatform {
@@ -1395,77 +1416,64 @@ async fn approved_existing_profile_attach_claims_then_binds_one_generation() {
 }
 
 #[tokio::test]
-async fn an_attached_tab_is_given_the_automation_hiding_script() {
-    const TRANSPORT: &str = "transport-v2-stealth";
-    let (f, _) = protected_existing_profile_fixture().await;
-    let prepare = BrowserPrepareTool::new(f.engine.clone())
-        .invoke(json!({
-            "pid": 1,
-            "window_id": 7,
-            "session": SESSION,
-            "_transport_session_id": TRANSPORT,
-            "strategy": { "kind": "existing_profile" }
-        }))
-        .await;
-    assert_eq!(
-        structured(&prepare)["status"],
-        "ok",
-        "{}",
-        structured(&prepare)
-    );
-
-    let state = GetBrowserStateTool::new(f.engine.clone())
-        .invoke(json!({
-            "pid": 1,
-            "window_id": 7,
-            "session": SESSION,
-            "_transport_session_id": TRANSPORT
-        }))
-        .await;
+async fn existing_profile_hiding_requires_separate_approval_and_removes_registration() {
+    const TRANSPORT: &str = "transport-v2-hiding-opt-in";
+    let (f, provider) = protected_existing_profile_fixture().await;
+    let prepared = BrowserPrepareTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION,
+        "_transport_session_id": TRANSPORT, "strategy": {"kind": "existing_profile"}
+    })).await;
+    assert_eq!(structured(&prepared)["status"], "ok", "{}", structured(&prepared));
+    provider.consent_seen.store(false, Ordering::SeqCst);
+    let state = GetBrowserStateTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION, "_transport_session_id": TRANSPORT
+    })).await;
     let bound = structured(&state);
     let target = bound["target_id"].as_str().unwrap().to_owned();
     let tab = bound["tabs"][0]["tab_id"].as_str().unwrap().to_owned();
-
-    let navigated = BrowserNavigateTool::new(f.engine.clone())
-        .invoke(json!({
-            "target_id": target,
-            "tab_id": tab,
-            "url": "https://fixture.test/stealth",
-            "session": SESSION
-        }))
-        .await;
-    assert_eq!(
-        structured(&navigated)["status"],
-        "ok",
-        "{}",
-        structured(&navigated)
-    );
-
+    f.state.lock().unwrap().hiding_navigation_events = true;
+    let navigated = BrowserNavigateTool::new(f.engine.clone()).invoke(json!({
+        "target_id": target, "tab_id": tab, "url": "https://fixture.test/approved",
+        "session": SESSION, "automation_hiding": true
+    })).await;
+    assert_eq!(structured(&navigated)["status"], "ok", "{}", structured(&navigated));
+    assert!(provider.consent_seen.load(Ordering::SeqCst), "a second trusted approval is required");
     let calls = f.state.lock().unwrap().calls.clone();
-    let on_tab = |method: &str| {
-        calls
-            .iter()
-            .filter(|(session, observed, _)| {
-                method == observed
-                    && session
-                        .as_deref()
-                        .is_some_and(|id| id.starts_with("tab-sess-"))
-            })
-            .collect::<Vec<_>>()
-    };
-    // Without `Page.enable` the registration is acknowledged and never runs.
-    assert!(
-        !on_tab("Page.enable").is_empty(),
-        "Page.enable must reach the tab session first: {calls:?}"
-    );
-    let registered = on_tab("Page.addScriptToEvaluateOnNewDocument");
-    assert_eq!(registered.len(), 1, "{calls:?}");
-    let source = registered[0].2["source"].as_str().unwrap();
-    assert!(
-        source.contains("Navigator.prototype, 'webdriver'"),
-        "{source}"
-    );
+    let register = calls.iter().position(|(_, method, _)| method == "Page.addScriptToEvaluateOnNewDocument").unwrap();
+    let navigate = calls.iter().position(|(_, method, _)| method == "Page.navigate").unwrap();
+    let remove = calls.iter().position(|(_, method, _)| method == "Page.removeScriptToEvaluateOnNewDocument").unwrap();
+    let detach = calls.iter().position(|(_, method, _)| method == "Target.detachFromTarget").unwrap();
+    assert!(register < navigate && navigate < remove && remove < detach);
+    let source = calls[register].2["source"].as_str().unwrap();
+    assert!(source.contains("self === self.top && location.origin === \"https://fixture.test\""));
+    assert_eq!(calls[remove].2["identifier"], "approved-script");
+    crate::session::fire_session_end(TRANSPORT);
+}
 
+#[tokio::test]
+async fn existing_profile_hiding_refuses_declined_trusted_approval() {
+    const TRANSPORT: &str = "transport-v2-hiding-denied";
+    let (f, provider) = protected_existing_profile_fixture().await;
+    let prepared = BrowserPrepareTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION,
+        "_transport_session_id": TRANSPORT, "strategy": {"kind": "existing_profile"}
+    })).await;
+    assert_eq!(structured(&prepared)["status"], "ok", "{}", structured(&prepared));
+    let state = GetBrowserStateTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION, "_transport_session_id": TRANSPORT
+    })).await;
+    let bound = structured(&state);
+    let target = bound["target_id"].as_str().unwrap().to_owned();
+    let tab = bound["tabs"][0]["tab_id"].as_str().unwrap().to_owned();
+    provider.decline_hiding.store(true, Ordering::SeqCst);
+    let denied = BrowserNavigateTool::new(f.engine.clone()).invoke(json!({
+        "target_id": target, "tab_id": tab, "url": "https://fixture.test/approved",
+        "session": SESSION, "automation_hiding": true
+    })).await;
+    assert_eq!(structured(&denied)["status"], "refused", "{}", structured(&denied));
+    assert_eq!(structured(&denied)["refusal"]["code"], "browser_consent_required");
+    let calls = f.state.lock().unwrap().calls.clone();
+    assert!(!calls.iter().any(|(_, method, _)| method == "Page.addScriptToEvaluateOnNewDocument" || method == "Page.navigate"));
     crate::session::fire_session_end(TRANSPORT);
 }
 
@@ -1547,11 +1555,9 @@ async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() 
         structured(&navigated)
     );
 
-    // `Page.enable` and `Page.addScriptToEvaluateOnNewDocument` were forbidden while nothing in
-    // the attach path used them. The attach path now registers the automation-hiding script on
-    // the tab's own session, and both are read-shaped: they change no state a later command
-    // depends on. `an_attached_tab_is_given_the_automation_hiding_script` pins that pairing.
+    // Attachment alone never authorizes document-start injection.
     let forbidden = [
+        "Page.addScriptToEvaluateOnNewDocument",
         "Runtime.enable",
         "Target.setDiscoverTargets",
         "Network.enable",
@@ -1888,6 +1894,7 @@ async fn refused_consent_cancels_stalled_claim_before_revoking_grant() {
         }),
         Some(Arc::new(FixtureProtectedProvider {
             consent_seen: AtomicBool::new(false),
+            decline_hiding: AtomicBool::new(false),
         })),
     );
     let prepared = tokio::time::timeout(
@@ -1934,6 +1941,7 @@ async fn cancelled_prepare_aborts_the_exact_pending_setup() {
         }),
         Some(Arc::new(FixtureProtectedProvider {
             consent_seen: AtomicBool::new(false),
+            decline_hiding: AtomicBool::new(false),
         })),
     );
     let cancelled = tokio::time::timeout(
@@ -2939,6 +2947,7 @@ async fn a_stale_binding_keeps_its_refusal_code_through_scope_attestation() {
     let mut registry = crate::tool::ToolRegistry::new_with_protected_consent_provider(Some(
         Arc::new(FixtureProtectedProvider {
             consent_seen: AtomicBool::new(false),
+            decline_hiding: AtomicBool::new(false),
         }),
     ));
     super::tools::register_browser_tools(&f.engine, &mut registry);

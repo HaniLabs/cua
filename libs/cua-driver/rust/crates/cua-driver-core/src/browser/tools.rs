@@ -1021,6 +1021,7 @@ impl BrowserNavigateTool {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "automation_hiding": { "type": "boolean", "default": false, "description": "Experimental existing-profile opt-in for this navigation attempt. Requires separate trusted-host approval for this exact tab and HTTPS origin, and is unavailable with a capability manifest. It changes page-visible browser properties; changes already applied last until that document is replaced." },
                     "session": schema_session(),
                 },
                 "required": ["target_id", "tab_id", "url"],
@@ -1105,6 +1106,80 @@ impl Tool for BrowserNavigateTool {
             Err(refusal) => return refusal.to_tool_result(),
         };
 
+        if args.opt_bool("automation_hiding").unwrap_or(false) {
+            let parsed = match url::Url::parse(&url) {
+                Ok(parsed) if parsed.scheme() == "https" && !parsed.origin().ascii_serialization().eq("null") => parsed,
+                _ => return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserConsentRequired,
+                    "automation hiding requires an exact HTTPS destination origin",
+                ).to_tool_result(),
+            };
+            let origin = parsed.origin().ascii_serialization();
+            let approval = match super::stealth::approve(&self.engine, &validated, &session, origin).await {
+                Ok(approval) => approval,
+                Err(error) => return BrowserRefusal::new(BrowserRefusalCode::BrowserConsentRequired, error).to_tool_result(),
+            };
+            // The approval UI may have taken time. Re-prove the exact browser,
+            // window, tab and authorization before any script is registered.
+            let checked = match self.engine.revalidate_for_mutation(&session, &target_id, Some(&tab_id)).await {
+                Ok(checked) => checked,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
+            if checked.record.generation != validated.record.generation
+                || checked.tab.generation != validated.tab.generation
+                || checked.tab.cdp_target_id != validated.tab.cdp_target_id
+                || checked.record.pid != validated.record.pid
+                || checked.record.window_id != validated.record.window_id
+                || checked.record.fingerprint != validated.record.fingerprint
+            {
+                return BrowserRefusal::new(BrowserRefusalCode::BrowserWrongTargetRefused, "browser binding changed while automation-hiding approval was pending").to_tool_result();
+            }
+            if checked.conn.dialog_state(&checked.tab.cdp_target_id).is_some() {
+                return BrowserRefusal::new(BrowserRefusalCode::BrowserActionUnavailable, "automation hiding is unavailable while a browser dialog is open").to_tool_result();
+            }
+            let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_on_drop = CancelNavigationOnDrop(ended.clone());
+            let marker = ended.clone();
+            let public_owner = session.clone();
+            let transport_owner = checked.record.transport_session.clone().unwrap_or_else(|| session.clone());
+            let hook = crate::session::register_scoped_fallible_session_end_hook(
+                "browser_hiding_navigation",
+                move |ended_session| {
+                    if ended_session == public_owner || ended_session == transport_owner {
+                        marker.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(())
+                },
+            );
+            match self.engine.existing_profile_grant(&session, checked.record.transport_session.as_deref(), checked.record.pid).await {
+                Ok(Some(grant)) if grant.generation == checked.record.generation && !ended.load(std::sync::atomic::Ordering::SeqCst) => {},
+                _ => return BrowserRefusal::new(BrowserRefusalCode::BrowserConsentRequired, "the existing-profile grant ended while approval was pending").to_tool_result(),
+            }
+            // A detached Tokio task owns registration, navigation and cleanup.
+            // Dropping the calling future cannot abandon a live CDP script.
+            let conn = checked.conn.clone();
+            let cdp_target = checked.tab.cdp_target_id.clone();
+            let dest = url.clone();
+            // Navigation can take effect even when its reply or cleanup is lost.
+            self.engine.store.invalidate_tab_snapshots(&session, &target_id, &tab_id);
+            let result = tokio::spawn(async move {
+                let _hook = hook;
+                navigate_with_hiding(conn, cdp_target, dest, approval, ended, _mutation).await
+            }).await;
+            drop(cancel_on_drop);
+            return match result {
+                Ok(Ok(result)) => {
+                    ToolResult::text(format!("navigation attempted for {tab_id}; automation-hiding registration removed"))
+                        .with_structured(json!({"status":"ok", "target_id":target_id, "tab_id":tab_id,
+                            "url":url, "refs_invalidated":true, "automation_hiding":"registration_removed",
+                            "note":"Page-visible changes can remain until the document is replaced; application is not guaranteed.",
+                            "navigation":result}))
+                }
+                Ok(Err(error)) => BrowserRefusal::new(BrowserRefusalCode::BrowserActionUnavailable, error).to_tool_result(),
+                Err(error) => BrowserRefusal::new(BrowserRefusalCode::BrowserActionUnavailable, format!("automation-hiding navigation task failed: {error}")).to_tool_result(),
+            };
+        }
+
         match validated
             .conn
             .call(
@@ -1133,6 +1208,159 @@ impl Tool for BrowserNavigateTool {
             Err(e) => ToolResult::error(format!("Page.navigate failed: {e}")),
         }
     }
+}
+
+struct CancelNavigationOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelNavigationOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct HidingSessionCleanup {
+    conn: Arc<CdpConnection>,
+    session: String,
+    target: String,
+    complete: bool,
+    mutation: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for HidingSessionCleanup {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        let conn = self.conn.clone();
+        let session = self.session.clone();
+        let target = self.target.clone();
+        let mutation = self.mutation.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _mutation = mutation;
+                let detached = conn.call_with_timeout(None, "Target.detachFromTarget", json!({"sessionId":session}), Duration::from_secs(2)).await.is_ok();
+                conn.unregister_dialog_session(&session, &target);
+                if !detached {
+                    conn.close_after_cleanup_failure().await;
+                }
+            });
+        }
+    }
+}
+
+/// Own a single separately approved script registration until it is removed.
+/// This runs in a spawned task so cancellation of the caller cannot abandon
+/// a script whose registration response is delayed or lost.
+async fn navigate_with_hiding(
+    conn: Arc<CdpConnection>,
+    cdp_target: String,
+    url: String,
+    approval: super::stealth::ApprovedHiding,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+    mutation: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<Value, String> {
+    use std::sync::atomic::Ordering;
+
+    if ended.load(Ordering::SeqCst) || !approval.is_live() {
+        return Err("session or automation-hiding approval has ended".into());
+    }
+    // Never detach the normal revalidation session: it may be the persistent
+    // dialog observer for this target. Create a separate session exclusively
+    // for the approved attempt and its document-start registration.
+    let attached = conn.call_with_timeout(None, "Target.attachToTarget", json!({"targetId":cdp_target, "flatten":true}), Duration::from_secs(2)).await;
+    let cdp_session = match attached {
+        Ok(value) => match value.get("sessionId").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => id.to_owned(),
+            _ => {
+                conn.close_after_cleanup_failure().await;
+                return Err("dedicated browser session returned no identity; the connection was closed".into());
+            }
+        },
+        Err(error) => {
+            // An attach timeout can leave an unknown session on a shared socket.
+            conn.close_after_cleanup_failure().await;
+            return Err(format!("dedicated browser attachment failed or timed out; the connection was closed: {error}"));
+        }
+    };
+    let mut cleanup = HidingSessionCleanup {
+        conn: conn.clone(),
+        session: cdp_session.clone(),
+        target: cdp_target.clone(),
+        complete: false,
+        mutation: Some(mutation),
+    };
+    let mut events = conn.subscribe();
+    let mut identifier: Option<String> = None;
+    let mut registration_sent = false;
+    let result: Result<Value, String> = async {
+        if ended.load(Ordering::SeqCst) || !approval.is_live() {
+            return Err("session or automation-hiding approval has ended".into());
+        }
+        conn.call_with_timeout(Some(&cdp_session), "Page.enable", json!({}), Duration::from_secs(2))
+            .await.map_err(|error| format!("cannot enable the approved tab: {error}"))?;
+        if ended.load(Ordering::SeqCst) || !approval.is_live() {
+            return Err("session or automation-hiding approval has ended".into());
+        }
+        registration_sent = true;
+        let registered = conn.register_approved_hiding_script(&cdp_session, &approval).await
+            .map_err(|error| format!("script registration failed or timed out: {error}"))?;
+        identifier = Some(registered.get("identifier").and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "script registration returned no identifier".to_owned())?.to_owned());
+        if ended.load(Ordering::SeqCst) || !approval.is_live() {
+            return Err("session or automation-hiding approval has ended".into());
+        }
+        let navigation = conn.call_with_timeout(Some(&cdp_session), "Page.navigate", json!({"url":url}), Duration::from_secs(5))
+            .await.map_err(|error| format!("navigation failed or timed out: {error}"))?;
+        if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+            return Err(format!("navigation failed: {error}"));
+        }
+        let frame = navigation.get("frameId").and_then(Value::as_str)
+            .ok_or_else(|| "navigation returned no frame identity; outcome is unknown".to_owned())?;
+        let loader = navigation.get("loaderId").and_then(Value::as_str)
+            .ok_or_else(|| "navigation returned no document loader; script application is unknown".to_owned())?;
+        let mut saw_commit = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if ended.load(Ordering::SeqCst) || !approval.is_live() {
+                return Err("session or automation-hiding approval ended during navigation".into());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("navigation load was not observed before the cleanup deadline; outcome is unknown".into());
+            }
+            tokio::select! {
+                event = events.recv() => match event {
+                    Some(event) if event.session_id.as_deref() == Some(cdp_session.as_str()) && event.method == "Page.frameNavigated" && event.params.pointer("/frame/id").and_then(Value::as_str) == Some(frame) && event.params.pointer("/frame/parentId").is_none() => saw_commit = event.params.pointer("/frame/loaderId").and_then(Value::as_str) == Some(loader),
+                    Some(event) if event.session_id.as_deref() == Some(cdp_session.as_str()) && event.method == "Page.loadEventFired" && saw_commit => return Ok(navigation),
+                    Some(event) if event.session_id.as_deref() == Some(cdp_session.as_str()) && event.method == "Page.javascriptDialogOpening" => return Err("navigation opened a dialog; outcome is unknown".into()),
+                    Some(_) => {},
+                    None => return Err("browser event connection closed; outcome is unknown".into()),
+                },
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+            }
+        }
+    }.await;
+
+    let removed = if let Some(identifier) = identifier.as_deref() {
+        conn.remove_approved_hiding_script(&cdp_session, identifier).await.is_ok()
+    } else {
+        // Registration might have been accepted even if the reply was lost.
+        !registration_sent
+    };
+    let detached = conn.call_with_timeout(None, "Target.detachFromTarget", json!({"sessionId":cdp_session}), Duration::from_secs(2)).await.is_ok();
+    conn.unregister_dialog_session(&cdp_session, &cdp_target);
+    if !detached {
+        conn.close_after_cleanup_failure().await;
+        cleanup.complete = true;
+        return Err("automation-hiding session could not be detached; the browser connection was closed and the navigation outcome is unknown".into());
+    }
+    cleanup.complete = true;
+    if !removed {
+        // Detaching destroys the per-session registration, but surface any
+        // uncertainty rather than claiming the removal command succeeded.
+        return Err("automation-hiding registration removal could not be confirmed; the dedicated session was detached and the navigation outcome is unknown".into());
+    }
+    result
 }
 
 // ── browser_click ────────────────────────────────────────────────────────────

@@ -56,7 +56,6 @@ use super::semantic::{
     OmissionCounts, SemanticDocument, SemanticNode, DEFAULT_SEMANTIC_NODE_BUDGET,
     SEMANTIC_COMPUTED_STYLES,
 };
-use super::stealth;
 use super::store::{
     format_ref, BrowserStore, BrowserVisibility, FrameIdentity, FrameKind, FrameRef, RefEntry,
     SemanticContinuation, SnapshotRecord, TabRecord, TargetRecord,
@@ -1678,12 +1677,6 @@ impl BrowserEngine {
         }
 
         let cdp_session = self.attach(&conn, &tab.cdp_target_id).await?;
-        // A tab attached to somebody's running browser cannot be relaunched with the automation
-        // flag, so the tell the sign-in walls read is repaired here instead. Best effort: an
-        // engine without a `Page` domain is still a drivable engine.
-        if let Err(detail) = stealth::install(&conn, &cdp_session).await {
-            tracing::debug!(target: "cua_driver::stealth", %detail, "automation hiding not installed");
-        }
         let dispatch_context = crate::tool::current_dispatch_authorization_context();
         if dispatch_context
             .as_deref()
