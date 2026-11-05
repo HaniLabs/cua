@@ -1021,7 +1021,7 @@ impl BrowserNavigateTool {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
-                    "automation_hiding": { "type": "boolean", "default": false, "description": "Experimental existing-profile opt-in for this navigation attempt. Requires separate trusted-host approval for this exact tab and HTTPS origin, and is unavailable with a capability manifest. It changes page-visible browser properties; changes already applied last until that document is replaced." },
+                    "automation_hiding": { "type": "boolean", "default": false, "description": "Experimental existing-profile opt-in for this navigation attempt. Requires separate trusted-host approval for this exact tab and HTTPS origin, and is unavailable in delegated, bounded or manifest-scoped sessions. It changes page-visible browser properties; changes already applied last until that document is replaced." },
                     "session": schema_session(),
                 },
                 "required": ["target_id", "tab_id", "url"],
@@ -1079,6 +1079,11 @@ impl Tool for BrowserNavigateTool {
             Ok(s) => s,
             Err(e) => return e,
         };
+        let automation_hiding = match args.get("automation_hiding") {
+            None => false,
+            Some(Value::Bool(enabled)) => *enabled,
+            Some(_) => return ToolResult::error("automation_hiding must be a boolean"),
+        };
         let lower = url.to_ascii_lowercase();
         if !(lower.starts_with("http://")
             || lower.starts_with("https://")
@@ -1106,7 +1111,7 @@ impl Tool for BrowserNavigateTool {
             Err(refusal) => return refusal.to_tool_result(),
         };
 
-        if args.opt_bool("automation_hiding").unwrap_or(false) {
+        if automation_hiding {
             let parsed = match url::Url::parse(&url) {
                 Ok(parsed) if parsed.scheme() == "https" && !parsed.origin().ascii_serialization().eq("null") => parsed,
                 _ => return BrowserRefusal::new(

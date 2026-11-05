@@ -100,6 +100,8 @@ pub(super) struct FixtureState {
     /// Answer every post-snapshot semantic readback after this delay.
     dom_click_readback_delay: Option<std::time::Duration>,
     hiding_navigation_events: bool,
+    hiding_registration_hangs: bool,
+    hiding_detach_fails: bool,
     /// Every incoming CDP call: (sessionId, method, params).
     calls: Vec<(Option<String>, String, Value)>,
 }
@@ -145,6 +147,8 @@ impl Default for FixtureState {
             dom_click_reads_before_failure: None,
             dom_click_readback_delay: None,
             hiding_navigation_events: false,
+            hiding_registration_hangs: false,
+            hiding_detach_fails: false,
             calls: Vec::new(),
         }
     }
@@ -662,7 +666,9 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     ])
                 } else { reply }
             },
+            "Page.addScriptToEvaluateOnNewDocument" if st.hiding_registration_hangs => MockReply::hang(),
             "Page.addScriptToEvaluateOnNewDocument" => MockReply::ok(json!({"identifier":"approved-script"})),
+            "Target.detachFromTarget" if st.hiding_detach_fails => MockReply::err(-32000, "fixture detach failed"),
             "Page.removeScriptToEvaluateOnNewDocument" | "Target.detachFromTarget" => MockReply::ok(json!({})),
             "Page.enable" => MockReply::ok(json!({})),
             "Target.setAutoAttach" if is_tab => {
@@ -1416,6 +1422,18 @@ async fn approved_existing_profile_attach_claims_then_binds_one_generation() {
 }
 
 #[tokio::test]
+async fn malformed_hiding_opt_in_refuses_without_navigation() {
+    let f = fixture().await;
+    let result = BrowserNavigateTool::new(f.engine.clone()).invoke(json!({
+        "target_id": "not-used", "tab_id": "not-used", "url": "https://fixture.test/",
+        "session": SESSION, "automation_hiding": "true"
+    })).await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(matches!(&result.content[..], [crate::protocol::Content::Text { text, .. }] if text == "automation_hiding must be a boolean"));
+    assert!(recorded_calls(&f, "Page.navigate").is_empty());
+}
+
+#[tokio::test]
 async fn existing_profile_hiding_requires_separate_approval_and_removes_registration() {
     const TRANSPORT: &str = "transport-v2-hiding-opt-in";
     let (f, provider) = protected_existing_profile_fixture().await;
@@ -1474,6 +1492,77 @@ async fn existing_profile_hiding_refuses_declined_trusted_approval() {
     assert_eq!(structured(&denied)["refusal"]["code"], "browser_consent_required");
     let calls = f.state.lock().unwrap().calls.clone();
     assert!(!calls.iter().any(|(_, method, _)| method == "Page.addScriptToEvaluateOnNewDocument" || method == "Page.navigate"));
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn canceled_hiding_registration_detaches_without_navigating() {
+    const TRANSPORT: &str = "transport-v2-hiding-cancel";
+    let (f, _) = protected_existing_profile_fixture().await;
+    let prepared = BrowserPrepareTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION,
+        "_transport_session_id": TRANSPORT, "strategy": {"kind": "existing_profile"}
+    })).await;
+    assert_eq!(structured(&prepared)["status"], "ok", "{}", structured(&prepared));
+    let state = GetBrowserStateTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION, "_transport_session_id": TRANSPORT
+    })).await;
+    let target = structured(&state)["target_id"].as_str().unwrap().to_owned();
+    let tab = structured(&state)["tabs"][0]["tab_id"].as_str().unwrap().to_owned();
+    f.state.lock().unwrap().hiding_registration_hangs = true;
+    let engine = f.engine.clone();
+    let call = tokio::spawn(async move {
+        BrowserNavigateTool::new(engine).invoke(json!({
+            "target_id": target, "tab_id": tab, "url": "https://fixture.test/approved",
+            "session": SESSION, "automation_hiding": true
+        })).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            if !recorded_calls(&f, "Page.addScriptToEvaluateOnNewDocument").is_empty() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("script registration reached the browser");
+    call.abort();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !recorded_calls(&f, "Target.detachFromTarget").is_empty() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("the dedicated session was detached after cancellation");
+    assert!(recorded_calls(&f, "Page.navigate").is_empty(), "canceled registration must not start navigation");
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn failed_hiding_detach_refuses_and_closes_the_connection() {
+    const TRANSPORT: &str = "transport-v2-hiding-detach";
+    let (f, _) = protected_existing_profile_fixture().await;
+    let prepared = BrowserPrepareTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION,
+        "_transport_session_id": TRANSPORT, "strategy": {"kind": "existing_profile"}
+    })).await;
+    assert_eq!(structured(&prepared)["status"], "ok", "{}", structured(&prepared));
+    let state = GetBrowserStateTool::new(f.engine.clone()).invoke(json!({
+        "pid": 1, "window_id": 7, "session": SESSION, "_transport_session_id": TRANSPORT
+    })).await;
+    let target = structured(&state)["target_id"].as_str().unwrap().to_owned();
+    let tab = structured(&state)["tabs"][0]["tab_id"].as_str().unwrap().to_owned();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.hiding_navigation_events = true;
+        state.hiding_detach_fails = true;
+    }
+    let result = BrowserNavigateTool::new(f.engine.clone()).invoke(json!({
+        "target_id": target, "tab_id": tab, "url": "https://fixture.test/approved",
+        "session": SESSION, "automation_hiding": true
+    })).await;
+    let refusal = structured(&result);
+    assert_eq!(refusal["status"], "refused", "{refusal}");
+    assert_eq!(refusal["refusal"]["code"], "browser_action_unavailable");
+    assert!(refusal["refusal"]["message"].as_str().unwrap().contains("connection was closed"));
+    assert_eq!(recorded_calls(&f, "Page.removeScriptToEvaluateOnNewDocument").len(), 1);
+    assert_eq!(recorded_calls(&f, "Target.detachFromTarget").len(), 1);
     crate::session::fire_session_end(TRANSPORT);
 }
 

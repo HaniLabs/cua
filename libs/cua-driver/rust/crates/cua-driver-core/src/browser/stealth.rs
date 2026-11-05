@@ -126,6 +126,8 @@ const HIDE_AUTOMATION_SCRIPT: &str = r#"
 pub(super) struct ApprovedHiding {
     origin: String,
     grant: crate::consent::ProtectedGrant,
+    managed_policy_sha256: Option<String>,
+    user_policy_sha256: Option<String>,
 }
 
 impl ApprovedHiding {
@@ -135,6 +137,8 @@ impl ApprovedHiding {
 
     pub(super) fn is_live(&self) -> bool {
         self.grant.is_live()
+            && matches!(crate::policy::managed_policy_sha256(), Ok(value) if value == self.managed_policy_sha256)
+            && matches!(crate::policy::user_policy_sha256(), Ok(value) if value == self.user_policy_sha256)
     }
 }
 
@@ -151,21 +155,19 @@ pub(super) async fn approve(
     origin: String,
 ) -> Result<ApprovedHiding, String> {
     use super::types::EndpointAccessClass;
-    use crate::authorization::{PermissionMode, RiskClass};
+    use crate::authorization::RiskClass;
 
     if tab.record.endpoint_access_class != EndpointAccessClass::ExistingProfileApproved {
         return Err("automation hiding is supported only for an approved existing-profile tab".into());
     }
     let context = crate::tool::current_dispatch_authorization_context();
-    if context.as_deref().is_some_and(|ctx| ctx.capability_manifest().is_some()) {
-        return Err("automation hiding is unavailable for manifest-scoped sessions".into());
+    if context.as_deref().is_some_and(|ctx| ctx.source() == crate::session_authorization::AuthorizationContextSource::TrustedHost) {
+        return Err("automation hiding is unavailable for delegated sessions".into());
     }
     let mode = context.as_deref().map(|ctx| ctx.mode()).map(Ok)
         .unwrap_or_else(crate::authorization::configured_permission_mode)
         .map_err(|error| format!("permission mode is unavailable: {error}"))?;
-    if mode == PermissionMode::Bounded {
-        return Err("automation hiding is unavailable for bounded sessions".into());
-    }
+    validate_scope(mode, context.as_deref().is_some_and(|ctx| ctx.capability_manifest().is_some()))?;
     let transport = tab.record.transport_session.as_deref().unwrap_or(public_session);
     let request = engine.approval_broker.request(
         mode,
@@ -189,7 +191,22 @@ pub(super) async fn approve(
     );
     let grant = engine.approval_broker.approve(&request).await
         .map_err(|error| format!("separate trusted approval was not granted: {error}"))?;
-    Ok(ApprovedHiding { origin, grant })
+    Ok(ApprovedHiding {
+        origin,
+        grant,
+        managed_policy_sha256: request.managed_policy_sha256,
+        user_policy_sha256: request.user_policy_sha256,
+    })
+}
+
+fn validate_scope(mode: crate::authorization::PermissionMode, has_manifest: bool) -> Result<(), String> {
+    if mode == crate::authorization::PermissionMode::Bounded {
+        return Err("automation hiding is unavailable for bounded sessions".into());
+    }
+    if has_manifest {
+        return Err("automation hiding is unavailable for manifest-scoped sessions".into());
+    }
+    Ok(())
 }
 
 /// Only the exact top-level HTTPS origin may execute the fixed script. JSON
@@ -197,4 +214,20 @@ pub(super) async fn approve(
 pub(super) fn script_for_origin(origin: &str) -> String {
     let scope = serde_json::to_string(origin).expect("serializing a string cannot fail");
     format!("if (self === self.top && location.origin === {scope}) {{\n{HIDE_AUTOMATION_SCRIPT}\n}}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_scope;
+    use crate::authorization::PermissionMode;
+
+    #[test]
+    fn hiding_rejects_every_bounded_or_manifest_scoped_dispatch() {
+        assert_eq!(validate_scope(PermissionMode::Bounded, false).unwrap_err(), "automation hiding is unavailable for bounded sessions");
+        assert_eq!(validate_scope(PermissionMode::Bounded, true).unwrap_err(), "automation hiding is unavailable for bounded sessions");
+        for mode in [PermissionMode::Standard, PermissionMode::Unrestricted] {
+            assert_eq!(validate_scope(mode, true).unwrap_err(), "automation hiding is unavailable for manifest-scoped sessions");
+            assert!(validate_scope(mode, false).is_ok());
+        }
+    }
 }

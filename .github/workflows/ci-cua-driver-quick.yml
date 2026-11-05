@@ -5,6 +5,7 @@ on:
     paths:
       - "libs/cua-driver/rust/**"
       - "libs/cua-driver/tests/fixtures/shared/web/**"
+      - "libs/cua-driver/tests/automation-hiding-script.test.cjs"
       - ".github/workflows/ci-cua-driver-quick.yml"
   workflow_dispatch:
 
@@ -45,6 +46,7 @@ jobs:
         run: |
           cargo fmt --manifest-path libs/cua-driver/rust/Cargo.toml --all -- --check
           node --test libs/cua-driver/tests/fixtures/shared/web/journal.test.cjs
+          node --test libs/cua-driver/tests/automation-hiding-script.test.cjs
       - name: Run focused perception and platform-independent contracts
         working-directory: libs/cua-driver/rust
         run: |
