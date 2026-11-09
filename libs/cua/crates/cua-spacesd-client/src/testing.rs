@@ -59,7 +59,7 @@ use tonic::{Status, body::Body};
 type Stream<T> = Pin<Box<dyn futures_util::Stream<Item = Result<T, Status>> + Send>>;
 
 /// How the mock authenticates callers.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MockAuth {
     /// Required env token (direct mode: `authorization`).
     pub token: Option<String>,
@@ -71,13 +71,32 @@ pub struct MockAuth {
     pub prefix: Option<String>,
 }
 
+impl std::fmt::Debug for MockAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockAuth")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("gateway", &self.gateway)
+            .field("prefix", &self.prefix)
+            .finish()
+    }
+}
+
 /// Gateway emulation settings.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MockGateway {
     /// Path prefix, e.g. `/m/<machine-id>`.
     pub prefix: String,
     /// Expected gateway bearer.
     pub bearer: String,
+}
+
+impl std::fmt::Debug for MockGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockGateway")
+            .field("prefix", &self.prefix)
+            .field("bearer", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Observations the tests assert on.
@@ -313,6 +332,9 @@ pub struct MockState {
     /// Report pointer input as delivered in the foreground without moving
     /// the pointer (input that reached nothing).
     pub pointer_not_moved: AtomicBool,
+    /// Accept `StartProcess` and never send a message on its stream (a
+    /// relay stream that went silent).
+    pub silent_start: AtomicBool,
     /// The `desktop` component `Health` reports (none: an older spacesd).
     pub desktop_health: Mutex<Option<pb::ComponentHealth>>,
     /// Extra supported features reported by `GetCapabilities` (for clients
@@ -342,6 +364,8 @@ pub struct MockState {
     /// Presence: joined participants and their event streams.
     presence: Mutex<Vec<(String, PresenceSender)>>,
     next_participant: AtomicU32,
+    /// The datagram channel `Join` offers in `joined` (none by default).
+    presence_datagrams: Mutex<Option<pb::PresenceDatagrams>>,
     /// Tunnel forwards by ticket.
     forwards: Mutex<HashMap<String, MockForward>>,
     next_forward: AtomicU32,
@@ -724,6 +748,13 @@ impl MockState {
             .collect();
         ids.sort();
         ids
+    }
+
+    /// Offers `info` as the presence datagram channel in every later
+    /// `Join` (its endpoint need not exist: a client that cannot reach it
+    /// is the case under test).
+    pub fn offer_presence_datagrams(&self, info: pb::PresenceDatagrams) {
+        *self.presence_datagrams.lock().unwrap() = Some(info);
     }
 
     /// Also report `names` as supported features in `GetCapabilities`.
@@ -1593,6 +1624,11 @@ impl ProcessService for Svc {
     ) -> Result<tonic::Response<Self::StartProcessStream>, Status> {
         let req = req.into_inner();
         self.0.started.lock().unwrap().push(req.clone());
+        if self.0.silent_start.load(Ordering::Relaxed) {
+            return Ok(tonic::Response::new(Box::pin(
+                futures_util::stream::pending(),
+            )));
+        }
         let cfg = req.config.clone().unwrap_or_default();
         if cfg.command == "sudo" {
             self.0.sudo_runs.fetch_add(1, Ordering::Relaxed);
@@ -3059,7 +3095,7 @@ impl PresenceService for Svc {
             event: Some(pb::join_response::Event::Joined(pb::PresenceJoined {
                 participant: Some(participant),
                 roster: vec![],
-                datagrams: None,
+                datagrams: self.0.presence_datagrams.lock().unwrap().clone(),
             })),
         }));
         self.0.presence.lock().unwrap().push((id, tx));

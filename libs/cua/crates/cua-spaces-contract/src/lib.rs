@@ -16,6 +16,7 @@
 //! are derived from.
 
 pub mod inputs;
+pub mod names;
 
 use serde::Serialize;
 
@@ -1202,6 +1203,17 @@ pub fn tools() -> Vec<Tool> {
         .with::<i::AgentCapabilities>(),
         Spec {
             category: Category::Agents,
+            result: "JSON: `{\"space\", \"agent\", \"state\"}`; `state` is `not_signed_in`, `signing_in` (with `url`, `code` (Codex: type it on that page) and `paste_code` (Claude Code: the person pastes the page's code back with action `code`)), `signed_in`, `failed` (with `reason`) or `expired`.",
+            errors: &["agent"],
+            instructions: "Only for a person, never for an agent: no MCP server lists or runs it. Signs Claude Code or Codex in on the Space's own computer with the agent's official sign-in (`claude auth login`, `codex login --device-auth`), so the sign-in stays in that computer's agent config and Cua never holds it. `start` shows a link (and Codex's code) for the person to open in their own browser; the person finishes it in their own browser.",
+            capabilities: &["agent.signin"],
+            sdk_symbol: "spaces.callTool(\"agent_sign_in\")",
+            rust_symbol: "Agents::sign_in",
+            ..Spec::new("agent_sign_in", "Sign a coding agent in on the Space's computer, the agent's own way.")
+        }
+        .with::<i::AgentSignIn>(),
+        Spec {
+            category: Category::Agents,
             result: "JSON: `threads`, newest first, each `agent` (harness id), `id`, `title` (the chat's name, or its first prompt cut to 80 characters), `cwd` (its folder, or null), `last_active_ms` and `resume` (the agent's own command that continues it in a terminal, as argv).",
             errors: &["permission_denied"],
             instructions: "Only for a person, never for an agent: no MCP server lists or runs it, and the daemon answers only this computer's own user (never a relay caller or a Space's agent). Reads the coding agents' own stores on this computer read-only (Claude Code's projects folder, Codex's sessions, Hermes's state.db) and returns only each chat's title, folder and time; nothing is kept or sent anywhere. A store that is missing or unreadable adds nothing.",
@@ -1460,7 +1472,7 @@ pub fn tools() -> Vec<Tool> {
             category: Category::Thread,
             result: "JSON: `reply` (the reply entry) and `update` (the `task_update` entry).",
             errors: &["forbidden"],
-            instructions: "Replies under a task and sets its state (`done` by default). When an agent ends a turn without replying, the daemon posts the turn's answer as its reply.",
+            instructions: "Replies under a task and sets its state (`done` by default). An agent does not need it for plain text: every message an agent writes between tool calls is posted to the thread as it is written, in order, and none is replaced. Use it to attach files, to mark a task `failed`, or to say something under a task that is already closed (the message is appended and the task keeps its state). A turn that says nothing ends with `Finished.`",
             capabilities: &["thread.post"],
             annotations: Annotations::mutating(),
             sdk_symbol: "space.thread().reply(_:text:)",
@@ -2281,7 +2293,12 @@ pub fn canonical(name: &str) -> &str {
 /// Tools only a person may call: no MCP server lists or runs them for an
 /// agent (the apps, the CLI and the SDK call them through the daemon).
 /// Their capabilities are never granted to an agent.
-pub const PERSON_ONLY_TOOLS: &[&str] = &["cloud_approve", "agent_threads", "agent_thread_read"];
+pub const PERSON_ONLY_TOOLS: &[&str] = &[
+    "cloud_approve",
+    "agent_threads",
+    "agent_thread_read",
+    "agent_sign_in",
+];
 
 /// Whether `name` is a tool only a person may call ([`PERSON_ONLY_TOOLS`]).
 pub fn person_only(name: &str) -> bool {
@@ -2388,7 +2405,7 @@ mod tests {
 
     #[test]
     fn advertises_every_tool() {
-        assert_eq!(tools().len(), 121);
+        assert_eq!(tools().len(), 122);
     }
 
     #[test]

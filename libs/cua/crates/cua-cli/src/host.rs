@@ -348,7 +348,7 @@ pub enum SpacesCmd {
     /// Registered Spaces and your computers on the relay.
     #[command(
         visible_alias = "list",
-        after_help = "CPU, MEMORY and DISK ON THIS MAC show what each Space was given and what it
+        after_help = "CPU, MEMORY and the DISK column (on this computer) show what each Space was given and what it
 uses now (the numbers the Cua Spaces app shows); for another of your
 computers they show what it last reported. Numbers only: no file names.
 
@@ -2991,6 +2991,17 @@ pub async fn run_host_to(
             opts.max_spaces = max_spaces;
             opts.allow_any_address = allow_any_address;
             opts.dedicated = dedicated;
+            // A computer paused because it was set up for another account
+            // (the app's "Use a code from another computer"): the code
+            // moves it to the code's account, keeping its setup. A plain
+            // setup would resume the old account's registration instead.
+            if let Some(code) = pair.as_deref() {
+                let code = cua_host::PairingCodeToken::parse(code).map_err(host_err)?;
+                if let Some(s) = host.rejoin_with_code(&code).await.map_err(host_err)? {
+                    emit(&s, json, out)?;
+                    return Ok(0);
+                }
+            }
             let spaces_only = !opts.share_desktop && host.resolve_provide_spaces(&opts);
             // Running it again changes nothing when this machine already
             // is that host; a host whose service stopped is started again
@@ -3385,6 +3396,19 @@ async fn setup_unchanged(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<i32, CuaError> {
+    // A service a build before CUA-3512 left under another home's names
+    // moves to this home's own, even when nothing else changes.
+    match host.migrate_service_names() {
+        Ok(moved) if !moved.is_empty() && !json => line(
+            out,
+            format!(
+                "Moved this computer's host service off an old name ({}); it now has its own.",
+                moved.join(", ")
+            ),
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("warning: could not move the host service to its own name: {e}"),
+    }
     let started = !state.is_up(want);
     let state = if started {
         let status = host.start_sharing().await.map_err(host_err)?;
@@ -5505,7 +5529,14 @@ mod tests {
         assert!(text.contains("lab-box") && text.contains("relay"), "{text}");
         // The new columns, and this machine's own row shows this Mac.
         assert!(text.starts_with("ID "), "{text}");
-        for column in ["CPU", "MEMORY", "DISK ON THIS MAC"] {
+        for column in [
+            "CPU",
+            "MEMORY",
+            &format!(
+                "DISK ON {}",
+                cua_spaces::resources::words::Host::current().this_upper()
+            ),
+        ] {
             assert!(text.lines().next().unwrap().contains(column), "{text}");
         }
         let row = text.lines().find(|l| l.contains("lab-box")).unwrap();
@@ -7078,6 +7109,7 @@ pub async fn run_children_ls(
                     "parent": parent_of(s),
                     "tree_address": s.tree_address,
                     "power": s.power,
+                    "state": s.power_state,
                     "image": s.image,
                     "expires_at_unix": s.expires_at_unix,
                 })
@@ -7103,10 +7135,12 @@ pub async fn run_children_ls(
         } else {
             &s.display_name
         };
-        let state = if s.power.is_empty() {
+        // The state (`running`, `stopped`), not how it turns off (`power`:
+        // `stop` or `suspend`), which reads as "stopped" for a running VM.
+        let state = if s.power_state.is_empty() {
             "-"
         } else {
-            s.power.as_str()
+            s.power_state.as_str()
         };
         // A VM's tree address; a container is reached by name on its
         // tree's network.
